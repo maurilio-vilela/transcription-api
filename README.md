@@ -108,3 +108,119 @@ Antes de usar a API, você precisa instalar as seguintes ferramentas no servidor
     pm2 start ./transcription-api --name transcription-api
     pm2 save
     ```
+
+## Uso
+
+#### Endpoint Principal: ``/transcription``
+* Método: POST
+* Content-Type: application/json
+* Corpo da Requisição:
+
+    ```json
+    {
+      "audio_base64": "<BASE64_DO_AUDIO>",
+      "video_base64": "<BASE64_DO_VIDEO>",
+      "image_base64": "<BASE64_DA_IMAGEM>",
+      "media_type": "audio" // ou "video" ou "image"
+    }
+    ```
+    
+    * Use apenas um dos campos ``audio_base64``, ``video_base64`` ou ``image_base64``, dependendo do ``media_type``.
+    
+* Resposta:
+    ```json
+    {
+      "transcription": "Texto transcrito",
+      "audio_response_base64": "<BASE64_DO_AUDIO_DE_RESPOSTA>",
+      "language": "pt",
+      "error": null
+    }
+    ```
+* Exemplo de Requisição:
+
+    ```json
+    curl -X POST https://api.dialogix.com.br/transcription \
+      -H "Content-Type: application/json" \
+      -d '{"audio_base64": "<BASE64_DO_.OGG>", "media_type": "audio"}'
+    ```
+    
+
+## Integração com n8n e Webhooks
+
+A API foi projetada para receber webhooks de workflows no n8n, substituindo integrações robóticas como o Typebot por um agente de IA mais robusto.
+
+#### Configuração no n8n
+
+1. Crie um Workflow no n8n:
+    
+    * Adicione um nó Webhook para receber eventos (ex.: mensagens de áudio ou texto de usuários).
+    * Configure o nó Webhook para enviar requisições POST para ``https://api.dialogix.com.br/transcription``.
+
+2. Estrutura do Webhook: 
+
+    * O nó Webhook deve enviar o áudio em Base64 no formato esperado pela API (veja o exemplo de requisição acima). 
+    * Use o nó HTTP Request no n8n para enviar a requisição POST para a API.
+    
+3. Processamento da Resposta:
+
+    * A API retorna a transcrição e um áudio de resposta em Base64.
+    * Use a transcrição para alimentar o agente de IA no n8n e o áudio de resposta para enviar de volta ao usuário (ex.: via WhatsApp).
+
+#### Exemplo de Workflow no n8n
+
+1. **Nó Webhook:** Recebe o áudio do usuário (ex.: via WhatsApp).
+2. **Nó HTTP Request:** 
+    * Método: POST
+    * URL: ``http://localhost:3200/transcription``
+    * Corpo: ``{"audio_base64": "{{$node['Webhook'].json['audio_base64']}}", "media_type": "audio"}``
+3. Nó de Agente de IA: Usa a transcrição retornada para gerar uma resposta inteligente.
+4. Nó de Envio: Envia a resposta do agente de IA e o audio_response_base64 de volta ao usuário.    
+    
+## Desempenho em Produção
+
+#### Escalabilidade para Alta Demanda
+
+Para lidar com picos de demanda (ex.: várias requisições simultâneas):
+
+1. **Aumente o Número de Instâncias:**
+    * Configure múltiplas instâncias da API com PM2:
+    ```bash
+    pm2 start transcription-api --name transcription-api --instances 4
+    ```
+    * Use um balanceador de carga (ex.: Nginx) para distribuir requisições entre as instâncias.
+
+2. **Otimização de Tempo:**
+    * Reduza o parâmetro --best-of do Whisper de 5 para 3 para diminuir o tempo de transcrição (teste o impacto na qualidade).
+    * Desative temporariamente o Piper-TTS durante picos de demanda, retornando apenas a transcrição:
+    ```go
+    // Comente a geração de áudio no main.go
+    audioResponseBase64 := ""
+    ```
+3. **Cache de Modelos:**
+    * O Whisper carrega o modelo ``ggml-small.bin`` (487 MB) a cada requisição. Configure o Whisper para manter o modelo em memória entre requisições, se possível.
+
+4. **Monitoramento:**
+    * Use o PM2 para monitorar o desempenho:
+    ```bash
+    pm2 monit
+    ```
+    * Configure alertas para CPU e memória para evitar gargalos.
+
+## Limitações e Otimizações Futuras
+
+* **Limite de 120 Segundos:** Áudios acima de 120 segundos são cortados. Para suportar áudios mais longos, aumente o limite e ajuste o hardware.
+* **Uso de CPU:** O Whisper roda na CPU (sem GPU). Para áudios longos e alta demanda, considere usar uma GPU para acelerar a transcrição.
+* **Qualidade da Transcrição em Português:** Embora o modelo ggml-small.bin tenha melhorado a transcrição, ainda há erros (ex.: "Nejamão" e "presidências marinas"). Teste o modelo ggml-medium.bin para maior precisão, mas avalie o impacto no tempo de execução.
+* **Detecção de Idioma:** A detecção automática (--language auto) funciona bem, mas o idioma retornado pode estar incorreto (ex.: áudio em inglês detectado como pt). Isso não afeta a transcrição, mas pode ser ajustado no futuro.
+
+## Contribuição
+
+1. Faça um fork do repositório.
+2. Crie uma branch para sua feature: ``git checkout -b feature/nova-funcionalidade.``
+3. Commit suas alterações: ``git commit -m "Adiciona nova funcionalidade".``
+4. Envie para o repositório remoto: ``git push origin feature/nova-funcionalidade.``
+5. Abra um Pull Request.
+
+## Licença
+
+MIT License. Veja o arquivo ``LICENSE`` para mais detalhes.
