@@ -23,10 +23,10 @@ type TranscriptionRequest struct {
 
 // TranscriptionResponse representa a estrutura da resposta retornada pelo endpoint /transcription
 type TranscriptionResponse struct {
-	Transcription      string `json:"transcription"`            // Texto transcrito ou extraído (OCR)
+	Transcription       string `json:"transcription"`           // Texto transcrito ou extraído (OCR)
 	AudioResponseBase64 string `json:"audio_response_base64,omitempty"` // Áudio de resposta gerado em Base64
-	Language           string `json:"language"`                 // Idioma detectado (ex.: "pt", "en")
-	Error              string `json:"error,omitempty"`          // Mensagem de erro, se houver
+	Language            string `json:"language"`                // Idioma detectado (ex.: "pt", "en")
+	Error               string `json:"error,omitempty"`         // Mensagem de erro, se houver
 }
 
 // transcriptionHandler é o handler para o endpoint /transcription
@@ -61,7 +61,18 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
-		inputData = req.AudioBase64
+		// Verifica se o valor de AudioBase64 é um JSON aninhado
+		var nestedData struct {
+			AudioBase64 string `json:"audio_base64"`
+		}
+		err := json.Unmarshal([]byte(req.AudioBase64), &nestedData)
+		if err == nil && nestedData.AudioBase64 != "" {
+			// Se for um JSON válido com o campo audio_base64, usa o valor interno
+			inputData = nestedData.AudioBase64
+		} else {
+			// Caso contrário, usa o valor diretamente
+			inputData = req.AudioBase64
+		}
 	case "video":
 		if req.VideoBase64 == "" {
 			resp := TranscriptionResponse{Error: "video_base64 é obrigatório para media_type video"}
@@ -97,7 +108,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 	var outputFile string
 	switch req.MediaType {
 	case "audio":
-		inputFile += ".ogg"
+		inputFile += ".ogg" // Tentaremos identificar o formato real depois
 		outputFile = tempDir + "/output.wav"
 	case "video":
 		inputFile += ".mp4"
@@ -125,81 +136,205 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 	var language string
 	switch req.MediaType {
 	case "audio":
-		// Converte o áudio para WAV (formato suportado pelo Whisper)
-		err = exec.Command("ffmpeg", "-i", inputFile, "-ar", "16000", "-ac", "1", outputFile).Run()
+		// Identifica o formato do arquivo usando ffprobe
+		start := time.Now()
+		cmd := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=format_name", "-of", "json", inputFile)
+		ffprobeOutput, err := cmd.CombinedOutput()
 		if err != nil {
-			resp := TranscriptionResponse{Error: "Erro ao converter áudio"}
+			resp := TranscriptionResponse{Error: "Erro ao identificar formato do arquivo: " + string(ffprobeOutput)}
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
+		var ffprobeResult struct {
+			Format struct {
+				FormatName string `json:"format_name"`
+			} `json:"format"`
+		}
+		err = json.Unmarshal(ffprobeOutput, &ffprobeResult)
+		if err != nil {
+			resp := TranscriptionResponse{Error: "Erro ao parsear saída do ffprobe: " + err.Error()}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		log.Printf("Formato do arquivo: %s", ffprobeResult.Format.FormatName)
+
+		// Converte o arquivo para .wav (limita a 30 segundos para evitar longos tempos de processamento)
+		err = exec.Command("ffmpeg", "-i", inputFile, "-ar", "16000", "-ac", "1", "-vn", "-map", "0:a", "-t", "30", outputFile).Run()
+		ffmpegDuration := time.Since(start)
+		log.Printf("Tempo de conversão com ffmpeg: %v", ffmpegDuration)
+		if err != nil {
+			resp := TranscriptionResponse{Error: "Erro ao converter áudio: " + err.Error()}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		// Verifica se o arquivo output.wav foi gerado e não está vazio
+		fileInfo, err := os.Stat(outputFile)
+		if err != nil {
+			resp := TranscriptionResponse{Error: "Arquivo de áudio convertido não encontrado: " + err.Error()}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		if fileInfo.Size() == 0 {
+			resp := TranscriptionResponse{Error: "Arquivo de áudio convertido está vazio"}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
 		// Transcreve com Whisper e detecta o idioma
-		jsonOutputFile := tempDir + "/transcription.json"
-		cmd := exec.Command("whisper", outputFile, "--model", "/usr/local/share/whisper-models/ggml-base.bin", "--language", "auto", "--output-json", "--output-file", tempDir+"/transcription")
+		start = time.Now()
+		cmd = exec.Command("whisper", outputFile, "--model", "/usr/local/share/whisper-models/ggml-base.bin", "--language", "auto", "--output-json", "--threads", "4", "--best-of", "3")
 		output, err := cmd.CombinedOutput()
+		whisperDuration := time.Since(start)
+		log.Printf("Tempo de transcrição com Whisper: %v", whisperDuration)
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao transcrever áudio: " + string(output)}
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
-		// Lê o arquivo JSON gerado pelo Whisper
-		jsonData, err := ioutil.ReadFile(jsonOutputFile)
+
+		// Log da saída do Whisper para depuração
+		err = ioutil.WriteFile(tempDir+"/whisper_output.log", output, 0644)
 		if err != nil {
-			resp := TranscriptionResponse{Error: "Erro ao ler arquivo JSON do Whisper"}
+			resp := TranscriptionResponse{Error: "Erro ao salvar log da saída do Whisper: " + err.Error()}
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
+
 		// Parseia a saída JSON do Whisper
 		var whisperOutput struct {
-			Transcription []struct {
-				Text string `json:"text"`
-			} `json:"transcription"`
 			Language string `json:"language"`
+			Text     string `json:"text"`
 		}
-		err = json.Unmarshal(jsonData, &whisperOutput)
+		err = json.Unmarshal(output, &whisperOutput)
 		if err != nil {
-			resp := TranscriptionResponse{Error: "Erro ao parsear saída do Whisper"}
+			resp := TranscriptionResponse{Error: "Erro ao parsear saída do Whisper: " + err.Error()}
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
-		// Combina o texto de todas as transcrições
-		var transcriptionParts []string
-		for _, t := range whisperOutput.Transcription {
-			transcriptionParts = append(transcriptionParts, t.Text)
-		}
-		transcription = strings.Join(transcriptionParts, " ")
+		transcription = whisperOutput.Text
 		language = whisperOutput.Language
 	case "video":
 		// Extrai o áudio do vídeo
-		err = exec.Command("ffmpeg", "-i", inputFile, "-vn", "-ar", "16000", "-ac", "1", outputFile).Run()
+		start := time.Now()
+		err = exec.Command("ffmpeg", "-i", inputFile, "-vn", "-ar", "16000", "-ac", "1", "-t", "30", outputFile).Run()
+		ffmpegDuration := time.Since(start)
+		log.Printf("Tempo de conversão com ffmpeg: %v", ffmpegDuration)
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao extrair áudio do vídeo"}
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
+
+		// Verifica se o arquivo audio.wav foi gerado e não está vazio
+		fileInfo, err := os.Stat(outputFile)
+		if err != nil {
+			resp := TranscriptionResponse{Error: "Arquivo de áudio convertido não encontrado: " + err.Error()}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		if fileInfo.Size() == 0 {
+			resp := TranscriptionResponse{Error: "Arquivo de áudio convertido está vazio"}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
 		// Transcreve com Whisper e detecta o idioma
-		jsonOutputFile := tempDir + "/transcription.json"
-		cmd := exec.Command("whisper", outputFile, "--model", "/usr/local/share/whisper-models/ggml-base.bin", "--language", "auto", "--output-json", "--output-file", tempDir+"/transcription")
+		start = time.Now()
+		cmd := exec.Command("whisper", outputFile, "--model", "/usr/local/share/whisper-models/ggml-base.bin", "--language", "auto", "--output-json", "--threads", "4", "--best-of", "3")
 		output, err := cmd.CombinedOutput()
+		whisperDuration := time.Since(start)
+		log.Printf("Tempo de transcrição com Whisper: %v", whisperDuration)
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao transcrever áudio do vídeo: " + string(output)}
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
-		// Lê o arquivo JSON gerado pelo Whisper
-		jsonData, err := ioutil.ReadFile(jsonOutputFile)
+
+		// Log da saída do Whisper para depuração
+		err = ioutil.WriteFile(tempDir+"/whisper_output.log", output, 0644)
 		if err != nil {
-			resp := TranscriptionResponse{Error: "Erro ao ler arquivo JSON do Whisper"}
+			resp := TranscriptionResponse{Error: "Erro ao salvar log da saída do Whisper: " + err.Error()}
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
+
 		// Parseia a saída JSON do Whisper
 		var whisperOutput struct {
-			Transcription []struct {
-				Text string `json:"text"`
-			} `json:"transcription"`
 			Language string `json:"language"`
+			Text     string `json:"text"`
 		}
-		err = json.Unmarshal(jsonData, &whisperOutput)
+		err = json.Unmarshal(output, &whisperOutput)
 		if err != nil {
-			resp := TranscriptionResponse{Error: "Erro ao parsear saída do Whisper"}
-			json
+			resp := TranscriptionResponse{Error: "Erro ao parsear saída do Whisper: " + err.Error()}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		transcription = whisperOutput.Text
+		language = whisperOutput.Language
+	case "image":
+		// Realiza OCR com Tesseract
+		cmd := exec.Command("tesseract", inputFile, "stdout", "-l", "por")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			resp := TranscriptionResponse{Error: "Erro ao realizar OCR: " + string(output)}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		transcription = strings.TrimSpace(string(output))
+		language = "pt" // Para imagens, assumimos português por padrão
+	}
+
+	// Seleciona o modelo de voz com base no idioma
+	var piperModel string
+	if language == "pt" {
+		piperModel = "pt_BR-faber-medium"
+	} else {
+		piperModel = "en_US-lessac-medium"
+	}
+
+	// Gera áudio de resposta com piper-tts (via Python)
+	audioFile := tempDir + "/response.wav"
+	responseText := "Transcrição: " + transcription
+	piperCmd := exec.Command("/www/wwwroot/dialogix/transcription-api/.venv/bin/piper", "--model", piperModel, "--output_file", audioFile)
+	piperCmd.Stdin = strings.NewReader(responseText)
+	output, err := piperCmd.CombinedOutput()
+	if err != nil {
+		resp := TranscriptionResponse{Error: fmt.Sprintf("Erro ao gerar áudio de resposta: %v - Output: %s - Command: %s", err, string(output), piperCmd.String())}
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	// Lê o áudio gerado e converte para Base64
+	audioData, err := ioutil.ReadFile(audioFile)
+	if err != nil {
+		resp := TranscriptionResponse{Error: "Erro ao ler áudio de resposta"}
+		json.NewEncoder(w).Encode(resp)
+		return
+	}
+	audioResponseBase64 := base64.StdEncoding.EncodeToString(audioData)
+
+	// Retorna a resposta
+	resp := TranscriptionResponse{
+		Transcription:       transcription,
+		AudioResponseBase64: audioResponseBase64,
+		Language:            language,
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+// Função principal
+func main() {
+	// Registra os handlers
+	http.HandleFunc("/transcription", transcriptionHandler)
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "API de transcrição funcionando")
+	})
+
+	// Inicia o servidor na porta 3200
+	log.Println("API rodando na porta 3200")
+	err := http.ListenAndServe(":3200", nil)
+	if err != nil {
+		log.Fatal("Erro ao iniciar o servidor:", err)
+	}
+}
