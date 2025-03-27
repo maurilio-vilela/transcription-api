@@ -101,7 +101,9 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(resp)
 		return
 	}
-	defer os.RemoveAll(tempDir)
+	log.Printf("Diretório temporário criado: %s", tempDir)
+	// Removido temporariamente para depuração
+	// defer os.RemoveAll(tempDir)
 
 	// Salva o arquivo de entrada
 	inputFile := tempDir + "/input"
@@ -183,15 +185,19 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Transcreve com Whisper e detecta o idioma
 		start = time.Now()
-		cmd = exec.Command("whisper", outputFile, "--model", "/usr/local/share/whisper-models/ggml-base.bin", "--language", "auto", "--output-json", "--threads", "4", "--best-of", "3")
-		output, err := cmd.CombinedOutput()
+		cmd = exec.Command("whisper", outputFile, "--model", "/usr/local/share/whisper-models/ggml-tiny.bin", "--language", "auto", "--output-json", "--threads", "4", "--best-of", "3", "--no-timestamps")
+		cmd.Stderr = os.Stderr // Redireciona stderr para os logs do PM2
+		output, err := cmd.Output() // Captura apenas o stdout
 		whisperDuration := time.Since(start)
 		log.Printf("Tempo de transcrição com Whisper: %v", whisperDuration)
 		if err != nil {
-			resp := TranscriptionResponse{Error: "Erro ao transcrever áudio: " + string(output)}
+			resp := TranscriptionResponse{Error: "Erro ao transcrever áudio: " + err.Error()}
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
+
+		// Log da saída do Whisper diretamente no PM2
+		log.Printf("Saída bruta do Whisper: %s", string(output))
 
 		// Log da saída do Whisper para depuração
 		err = ioutil.WriteFile(tempDir+"/whisper_output.log", output, 0644)
@@ -241,15 +247,19 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Transcreve com Whisper e detecta o idioma
 		start = time.Now()
-		cmd := exec.Command("whisper", outputFile, "--model", "/usr/local/share/whisper-models/ggml-base.bin", "--language", "auto", "--output-json", "--threads", "4", "--best-of", "3")
-		output, err := cmd.CombinedOutput()
+		cmd := exec.Command("whisper", outputFile, "--model", "/usr/local/share/whisper-models/ggml-tiny.bin", "--language", "auto", "--output-json", "--threads", "4", "--best-of", "3", "--no-timestamps")
+		cmd.Stderr = os.Stderr // Redireciona stderr para os logs do PM2
+		output, err := cmd.Output() // Captura apenas o stdout
 		whisperDuration := time.Since(start)
 		log.Printf("Tempo de transcrição com Whisper: %v", whisperDuration)
 		if err != nil {
-			resp := TranscriptionResponse{Error: "Erro ao transcrever áudio do vídeo: " + string(output)}
+			resp := TranscriptionResponse{Error: "Erro ao transcrever áudio do vídeo: " + err.Error()}
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
+
+		// Log da saída do Whisper diretamente no PM2
+		log.Printf("Saída bruta do Whisper: %s", string(output))
 
 		// Log da saída do Whisper para depuração
 		err = ioutil.WriteFile(tempDir+"/whisper_output.log", output, 0644)
@@ -321,6 +331,9 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		Language:            language,
 	}
 	json.NewEncoder(w).Encode(resp)
+
+	// Limpa o diretório temporário (reative após a depuração)
+	// os.RemoveAll(tempDir)
 }
 
 // Função principal
