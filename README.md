@@ -138,7 +138,7 @@ Antes de usar a API, você precisa instalar as seguintes ferramentas no servidor
     ```
 * Exemplo de Requisição:
 
-    ```json
+    ```bash
     curl -X POST https://api.dialogix.com.br/transcription \
       -H "Content-Type: application/json" \
       -d '{"audio_base64": "<BASE64_DO_.OGG>", "media_type": "audio"}'
