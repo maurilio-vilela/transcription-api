@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -147,7 +148,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 	case "audio":
 		// Identifica o formato do arquivo usando ffprobe
 		start := time.Now()
-		cmd := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=format_name", "-of", "json", inputFile)
+		cmd := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=format_name:stream=duration", "-of", "json", inputFile)
 		ffprobeOutput, err := cmd.CombinedOutput()
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao identificar formato do arquivo: " + string(ffprobeOutput)}
@@ -158,6 +159,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		var ffprobeResult struct {
 			Format struct {
 				FormatName string `json:"format_name"`
+				Duration   string `json:"duration"`
 			} `json:"format"`
 		}
 		err = json.Unmarshal(ffprobeOutput, &ffprobeResult)
@@ -169,8 +171,25 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("Formato do arquivo: %s", ffprobeResult.Format.FormatName)
 
-		// Converte o arquivo para .wav (limita a 30 segundos para evitar longos tempos de processamento)
-		err = exec.Command("ffmpeg", "-i", inputFile, "-ar", "16000", "-ac", "1", "-vn", "-map", "0:a", "-t", "30", "-af", "afftdn", outputFile).Run()
+		// Verifica a duração do áudio
+		duration, err := strconv.ParseFloat(ffprobeResult.Format.Duration, 64)
+		if err != nil {
+			resp := TranscriptionResponse{Error: "Erro ao obter duração do áudio: " + err.Error()}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		if duration > 120 {
+			log.Printf("Áudio excede 120 segundos (%.2f segundos), cortando para 120 segundos", duration)
+			duration = 120
+		}
+
+		// Converte o arquivo para .wav
+		ffmpegArgs := []string{"-i", inputFile, "-ar", "16000", "-ac", "1", "-vn", "-map", "0:a", "-af", "afftdn", outputFile}
+		if duration == 120 {
+			ffmpegArgs = append(ffmpegArgs, "-t", "120")
+		}
+		err = exec.Command("ffmpeg", ffmpegArgs...).Run()
 		ffmpegDuration := time.Since(start)
 		log.Printf("Tempo de conversão com ffmpeg: %v", ffmpegDuration)
 		if err != nil {
@@ -195,9 +214,9 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Transcreve com Whisper e detecta o idioma
+		// Transcreve com Whisper
 		start = time.Now()
-		cmd = exec.Command("whisper", outputFile, "--model", "/usr/local/share/whisper-models/ggml-small.bin", "--language", "pt", "--output-json", "--threads", "2", "--best-of", "5", "--no-timestamps")
+		cmd = exec.Command("whisper", outputFile, "--model", "/usr/local/share/whisper-models/ggml-small.bin", "--language", "auto", "--output-json", "--threads", "2", "--best-of", "5", "--no-timestamps")
 		cmd.Stderr = os.Stderr // Redireciona stderr para os logs do PM2
 		output, err := cmd.Output() // Captura o stdout (transcrição bruta)
 		whisperDuration := time.Since(start)
@@ -213,7 +232,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Saída bruta do Whisper (stdout): %s", string(output))
 
 		// Lê o arquivo JSON gerado pelo Whisper
-		jsonFile := outputFile + ".json" // ex.: temp-1743091900177136763/output.wav.json
+		jsonFile := outputFile + ".json" // ex.: temp-1743093117118393698/output.wav.json
 		jsonData, err := ioutil.ReadFile(jsonFile)
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao ler arquivo JSON do Whisper: " + err.Error()}
@@ -253,9 +272,50 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		transcription = whisperOutput.Transcription[0].Text
 		language = whisperOutput.Result.Language
 	case "video":
-		// Extrai o áudio do vídeo
+		// Identifica o formato do arquivo usando ffprobe
 		start := time.Now()
-		err = exec.Command("ffmpeg", "-i", inputFile, "-vn", "-ar", "16000", "-ac", "1", "-t", "30", "-af", "afftdn", outputFile).Run()
+		cmd := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=format_name:stream=duration", "-of", "json", inputFile)
+		ffprobeOutput, err := cmd.CombinedOutput()
+		if err != nil {
+			resp := TranscriptionResponse{Error: "Erro ao identificar formato do arquivo: " + string(ffprobeOutput)}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		var ffprobeResult struct {
+			Format struct {
+				FormatName string `json:"format_name"`
+				Duration   string `json:"duration"`
+			} `json:"format"`
+		}
+		err = json.Unmarshal(ffprobeOutput, &ffprobeResult)
+		if err != nil {
+			resp := TranscriptionResponse{Error: "Erro ao parsear saída do ffprobe: " + err.Error()}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		log.Printf("Formato do arquivo: %s", ffprobeResult.Format.FormatName)
+
+		// Verifica a duração do vídeo
+		duration, err := strconv.ParseFloat(ffprobeResult.Format.Duration, 64)
+		if err != nil {
+			resp := TranscriptionResponse{Error: "Erro ao obter duração do vídeo: " + err.Error()}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		if duration > 120 {
+			log.Printf("Vídeo excede 120 segundos (%.2f segundos), cortando para 120 segundos", duration)
+			duration = 120
+		}
+
+		// Extrai o áudio do vídeo
+		ffmpegArgs := []string{"-i", inputFile, "-vn", "-ar", "16000", "-ac", "1", "-af", "afftdn", outputFile}
+		if duration == 120 {
+			ffmpegArgs = append(ffmpegArgs, "-t", "120")
+		}
+		err = exec.Command("ffmpeg", ffmpegArgs...).Run()
 		ffmpegDuration := time.Since(start)
 		log.Printf("Tempo de conversão com ffmpeg: %v", ffmpegDuration)
 		if err != nil {
@@ -280,7 +340,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Transcreve com Whisper e detecta o idioma
+		// Transcreve com Whisper
 		start = time.Now()
 		cmd := exec.Command("whisper", outputFile, "--model", "/usr/local/share/whisper-models/ggml-small.bin", "--language", "auto", "--output-json", "--threads", "2", "--best-of", "5", "--no-timestamps")
 		cmd.Stderr = os.Stderr // Redireciona stderr para os logs do PM2
@@ -298,7 +358,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Saída bruta do Whisper (stdout): %s", string(output))
 
 		// Lê o arquivo JSON gerado pelo Whisper
-		jsonFile := outputFile + ".json" // ex.: temp-1743091900177136763/audio.wav.json
+		jsonFile := outputFile + ".json" // ex.: temp-1743093117118393698/audio.wav.json
 		jsonData, err := ioutil.ReadFile(jsonFile)
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao ler arquivo JSON do Whisper: " + err.Error()}
@@ -354,7 +414,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 	// Seleciona o modelo de voz com base no idioma
 	var piperModel string
 	if language == "pt" {
-		piperModel = "pt_BR-faber-medium" // Pode mudar para pt_BR-faber-low para otimizar
+		piperModel = "pt_BR-faber-medium"
 	} else {
 		piperModel = "en_US-lessac-medium"
 	}
