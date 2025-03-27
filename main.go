@@ -213,7 +213,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Saída bruta do Whisper (stdout): %s", string(output))
 
 		// Lê o arquivo JSON gerado pelo Whisper
-		jsonFile := outputFile + ".json" // ex.: temp-1743086854952533870/output.wav.json
+		jsonFile := outputFile + ".json" // ex.: temp-1743088061276978383/output.wav.json
 		jsonData, err := ioutil.ReadFile(jsonFile)
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao ler arquivo JSON do Whisper: " + err.Error()}
@@ -227,8 +227,12 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Parseia o JSON
 		var whisperOutput struct {
-			Language string `json:"language"`
-			Text     string `json:"text"`
+			Result struct {
+				Language string `json:"language"`
+			} `json:"result"`
+			Transcription []struct {
+				Text string `json:"text"`
+			} `json:"transcription"`
 		}
 		err = json.Unmarshal(jsonData, &whisperOutput)
 		if err != nil {
@@ -238,8 +242,16 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		transcription = whisperOutput.Text
-		language = whisperOutput.Language
+		// Verifica se há transcrição disponível
+		if len(whisperOutput.Transcription) == 0 {
+			resp := TranscriptionResponse{Error: "Nenhuma transcrição encontrada no JSON do Whisper"}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		transcription = whisperOutput.Transcription[0].Text
+		language = whisperOutput.Result.Language
 	case "video":
 		// Extrai o áudio do vídeo
 		start := time.Now()
@@ -286,7 +298,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Saída bruta do Whisper (stdout): %s", string(output))
 
 		// Lê o arquivo JSON gerado pelo Whisper
-		jsonFile := outputFile + ".json" // ex.: temp-1743086854952533870/audio.wav.json
+		jsonFile := outputFile + ".json" // ex.: temp-1743088061276978383/audio.wav.json
 		jsonData, err := ioutil.ReadFile(jsonFile)
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao ler arquivo JSON do Whisper: " + err.Error()}
@@ -300,8 +312,12 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 
 		// Parseia o JSON
 		var whisperOutput struct {
-			Language string `json:"language"`
-			Text     string `json:"text"`
+			Result struct {
+				Language string `json:"language"`
+			} `json:"result"`
+			Transcription []struct {
+				Text string `json:"text"`
+			} `json:"transcription"`
 		}
 		err = json.Unmarshal(jsonData, &whisperOutput)
 		if err != nil {
@@ -311,8 +327,16 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		transcription = whisperOutput.Text
-		language = whisperOutput.Language
+		// Verifica se há transcrição disponível
+		if len(whisperOutput.Transcription) == 0 {
+			resp := TranscriptionResponse{Error: "Nenhuma transcrição encontrada no JSON do Whisper"}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		transcription = whisperOutput.Transcription[0].Text
+		language = whisperOutput.Result.Language
 	case "image":
 		// Realiza OCR com Tesseract
 		cmd := exec.Command("tesseract", inputFile, "stdout", "-l", "por")
