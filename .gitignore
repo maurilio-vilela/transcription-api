@@ -1,0 +1,31 @@
+# Ambiente virtual do Python
+.venv/
+
+# Arquivos de áudio gerados para teste
+bemvindo.wav
+welcome.wav
+
+# Arquivos JSON gerados pelo Whisper
+bemvindo.wav.json
+
+# Modelos do Piper-TTS (baixados durante a configuração)
+en_US-lessac-medium.onnx
+en_US-lessac-medium.onnx.json
+pt_BR-faber-medium.onnx
+pt_BR-faber-medium.onnx.json
+
+# Diretório do whisper.cpp (dependência externa)
+whisper.cpp/
+
+# Binários gerados pelo Go
+transcription-api
+
+# Diretórios temporários criados pela API
+temp-*
+
+# Arquivos de log
+*.log
+
+# Arquivos temporários do sistema
+*.tmp
+*.swp
