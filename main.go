@@ -48,6 +48,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 	// Validação do campo media_type
 	if req.MediaType == "" {
 		resp := TranscriptionResponse{Error: "media_type é obrigatório (audio, video, image)"}
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 		return
 	}
@@ -58,6 +59,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 	case "audio":
 		if req.AudioBase64 == "" {
 			resp := TranscriptionResponse{Error: "audio_base64 é obrigatório para media_type audio"}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
@@ -76,6 +78,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 	case "video":
 		if req.VideoBase64 == "" {
 			resp := TranscriptionResponse{Error: "video_base64 é obrigatório para media_type video"}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
@@ -83,12 +86,14 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 	case "image":
 		if req.ImageBase64 == "" {
 			resp := TranscriptionResponse{Error: "image_base64 é obrigatório para media_type image"}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
 		inputData = req.ImageBase64
 	default:
 		resp := TranscriptionResponse{Error: "media_type inválido (deve ser audio, video ou image)"}
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 		return
 	}
@@ -98,12 +103,12 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 	err = os.Mkdir(tempDir, 0755)
 	if err != nil {
 		resp := TranscriptionResponse{Error: "Erro ao criar diretório temporário"}
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 		return
 	}
 	log.Printf("Diretório temporário criado: %s", tempDir)
-	// Removido temporariamente para depuração
-	// defer os.RemoveAll(tempDir)
+	defer os.RemoveAll(tempDir)
 
 	// Salva o arquivo de entrada
 	inputFile := tempDir + "/input"
@@ -123,12 +128,14 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 	data, err := base64.StdEncoding.DecodeString(inputData)
 	if err != nil {
 		resp := TranscriptionResponse{Error: "Dados Base64 inválidos"}
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 		return
 	}
 	err = ioutil.WriteFile(inputFile, data, 0644)
 	if err != nil {
 		resp := TranscriptionResponse{Error: "Erro ao salvar arquivo de entrada"}
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 		return
 	}
@@ -144,6 +151,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		ffprobeOutput, err := cmd.CombinedOutput()
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao identificar formato do arquivo: " + string(ffprobeOutput)}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
@@ -155,6 +163,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		err = json.Unmarshal(ffprobeOutput, &ffprobeResult)
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao parsear saída do ffprobe: " + err.Error()}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
@@ -166,6 +175,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Tempo de conversão com ffmpeg: %v", ffmpegDuration)
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao converter áudio: " + err.Error()}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
@@ -174,11 +184,13 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		fileInfo, err := os.Stat(outputFile)
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Arquivo de áudio convertido não encontrado: " + err.Error()}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
 		if fileInfo.Size() == 0 {
 			resp := TranscriptionResponse{Error: "Arquivo de áudio convertido está vazio"}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
@@ -187,37 +199,45 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		start = time.Now()
 		cmd = exec.Command("whisper", outputFile, "--model", "/usr/local/share/whisper-models/ggml-tiny.bin", "--language", "auto", "--output-json", "--threads", "4", "--best-of", "3", "--no-timestamps")
 		cmd.Stderr = os.Stderr // Redireciona stderr para os logs do PM2
-		output, err := cmd.Output() // Captura apenas o stdout
+		output, err := cmd.Output() // Captura o stdout (transcrição bruta)
 		whisperDuration := time.Since(start)
 		log.Printf("Tempo de transcrição com Whisper: %v", whisperDuration)
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao transcrever áudio: " + err.Error()}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
 
-		// Log da saída do Whisper diretamente no PM2
-		log.Printf("Saída bruta do Whisper: %s", string(output))
+		// Log da saída bruta do Whisper (transcrição bruta)
+		log.Printf("Saída bruta do Whisper (stdout): %s", string(output))
 
-		// Log da saída do Whisper para depuração
-		err = ioutil.WriteFile(tempDir+"/whisper_output.log", output, 0644)
+		// Lê o arquivo JSON gerado pelo Whisper
+		jsonFile := outputFile + ".json" // ex.: temp-1743086854952533870/output.wav.json
+		jsonData, err := ioutil.ReadFile(jsonFile)
 		if err != nil {
-			resp := TranscriptionResponse{Error: "Erro ao salvar log da saída do Whisper: " + err.Error()}
+			resp := TranscriptionResponse{Error: "Erro ao ler arquivo JSON do Whisper: " + err.Error()}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
 
-		// Parseia a saída JSON do Whisper
+		// Log do conteúdo do arquivo JSON
+		log.Printf("Conteúdo do arquivo JSON do Whisper: %s", string(jsonData))
+
+		// Parseia o JSON
 		var whisperOutput struct {
 			Language string `json:"language"`
 			Text     string `json:"text"`
 		}
-		err = json.Unmarshal(output, &whisperOutput)
+		err = json.Unmarshal(jsonData, &whisperOutput)
 		if err != nil {
-			resp := TranscriptionResponse{Error: "Erro ao parsear saída do Whisper: " + err.Error()}
+			resp := TranscriptionResponse{Error: "Erro ao parsear arquivo JSON do Whisper: " + err.Error()}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
+
 		transcription = whisperOutput.Text
 		language = whisperOutput.Language
 	case "video":
@@ -228,6 +248,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Tempo de conversão com ffmpeg: %v", ffmpegDuration)
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao extrair áudio do vídeo"}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
@@ -236,11 +257,13 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		fileInfo, err := os.Stat(outputFile)
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Arquivo de áudio convertido não encontrado: " + err.Error()}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
 		if fileInfo.Size() == 0 {
 			resp := TranscriptionResponse{Error: "Arquivo de áudio convertido está vazio"}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
@@ -249,37 +272,45 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		start = time.Now()
 		cmd := exec.Command("whisper", outputFile, "--model", "/usr/local/share/whisper-models/ggml-tiny.bin", "--language", "auto", "--output-json", "--threads", "4", "--best-of", "3", "--no-timestamps")
 		cmd.Stderr = os.Stderr // Redireciona stderr para os logs do PM2
-		output, err := cmd.Output() // Captura apenas o stdout
+		output, err := cmd.Output() // Captura o stdout (transcrição bruta)
 		whisperDuration := time.Since(start)
 		log.Printf("Tempo de transcrição com Whisper: %v", whisperDuration)
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao transcrever áudio do vídeo: " + err.Error()}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
 
-		// Log da saída do Whisper diretamente no PM2
-		log.Printf("Saída bruta do Whisper: %s", string(output))
+		// Log da saída bruta do Whisper (transcrição bruta)
+		log.Printf("Saída bruta do Whisper (stdout): %s", string(output))
 
-		// Log da saída do Whisper para depuração
-		err = ioutil.WriteFile(tempDir+"/whisper_output.log", output, 0644)
+		// Lê o arquivo JSON gerado pelo Whisper
+		jsonFile := outputFile + ".json" // ex.: temp-1743086854952533870/audio.wav.json
+		jsonData, err := ioutil.ReadFile(jsonFile)
 		if err != nil {
-			resp := TranscriptionResponse{Error: "Erro ao salvar log da saída do Whisper: " + err.Error()}
+			resp := TranscriptionResponse{Error: "Erro ao ler arquivo JSON do Whisper: " + err.Error()}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
 
-		// Parseia a saída JSON do Whisper
+		// Log do conteúdo do arquivo JSON
+		log.Printf("Conteúdo do arquivo JSON do Whisper: %s", string(jsonData))
+
+		// Parseia o JSON
 		var whisperOutput struct {
 			Language string `json:"language"`
 			Text     string `json:"text"`
 		}
-		err = json.Unmarshal(output, &whisperOutput)
+		err = json.Unmarshal(jsonData, &whisperOutput)
 		if err != nil {
-			resp := TranscriptionResponse{Error: "Erro ao parsear saída do Whisper: " + err.Error()}
+			resp := TranscriptionResponse{Error: "Erro ao parsear arquivo JSON do Whisper: " + err.Error()}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
+
 		transcription = whisperOutput.Text
 		language = whisperOutput.Language
 	case "image":
@@ -288,6 +319,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao realizar OCR: " + string(output)}
+			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
@@ -311,6 +343,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 	output, err := piperCmd.CombinedOutput()
 	if err != nil {
 		resp := TranscriptionResponse{Error: fmt.Sprintf("Erro ao gerar áudio de resposta: %v - Output: %s - Command: %s", err, string(output), piperCmd.String())}
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 		return
 	}
@@ -319,6 +352,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 	audioData, err := ioutil.ReadFile(audioFile)
 	if err != nil {
 		resp := TranscriptionResponse{Error: "Erro ao ler áudio de resposta"}
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 		return
 	}
@@ -330,10 +364,8 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		AudioResponseBase64: audioResponseBase64,
 		Language:            language,
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
-
-	// Limpa o diretório temporário (reative após a depuração)
-	// os.RemoveAll(tempDir)
 }
 
 // Função principal
