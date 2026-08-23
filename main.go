@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
@@ -11,11 +12,11 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -121,29 +122,120 @@ func decryptWhatsAppMedia(encAudioBase64, mediaKeyBase64, mediaType string) ([]b
 
 // --- FIM DA CONFIGURAÇÃO DE CRIPTOGRAFIA ---
 
-// getWhisperBinary retorna o binário do Whisper apropriado com base na arquitetura do servidor
-func getWhisperBinary() string {
-	arch := runtime.GOARCH
-	if arch == "amd64" {
-		return "/usr/local/bin/whisper-x86_64"
-	} else if arch == "arm64" {
-		return "/usr/local/bin/whisper-aarch64"
-	}
-	log.Fatalf("Arquitetura não suportada: %s", arch)
-	return ""
+// whisperLangFullToShort mapeia o nome completo do idioma que o
+// whisper-server devolve (response_format=verbose_json, ex.: "portuguese")
+// pro codigo curto de 2 letras que o resto do codigo espera (ex.: "pt",
+// igual ao que o CLI com --output-json devolvia em result.language).
+// Tabela extraida direto de src/whisper.cpp (g_lang) do proprio whisper.cpp,
+// pra bater exatamente com o que o binario ja usa.
+var whisperLangFullToShort = map[string]string{
+	"english": "en", "chinese": "zh", "german": "de", "spanish": "es",
+	"russian": "ru", "korean": "ko", "french": "fr", "japanese": "ja",
+	"portuguese": "pt", "turkish": "tr", "polish": "pl", "catalan": "ca",
+	"dutch": "nl", "arabic": "ar", "swedish": "sv", "italian": "it",
+	"indonesian": "id", "hindi": "hi", "finnish": "fi", "vietnamese": "vi",
+	"hebrew": "he", "ukrainian": "uk", "greek": "el", "malay": "ms",
+	"czech": "cs", "romanian": "ro", "danish": "da", "hungarian": "hu",
+	"tamil": "ta", "norwegian": "no", "thai": "th", "urdu": "ur",
+	"croatian": "hr", "bulgarian": "bg", "lithuanian": "lt", "latin": "la",
+	"maori": "mi", "malayalam": "ml", "welsh": "cy", "slovak": "sk",
+	"telugu": "te", "persian": "fa", "latvian": "lv", "bengali": "bn",
+	"serbian": "sr", "azerbaijani": "az", "slovenian": "sl", "kannada": "kn",
+	"estonian": "et", "macedonian": "mk", "breton": "br", "basque": "eu",
+	"icelandic": "is", "armenian": "hy", "nepali": "ne", "mongolian": "mn",
+	"bosnian": "bs", "kazakh": "kk", "albanian": "sq", "swahili": "sw",
+	"galician": "gl", "marathi": "mr", "punjabi": "pa", "sinhala": "si",
+	"khmer": "km", "shona": "sn", "yoruba": "yo", "somali": "so",
+	"afrikaans": "af", "occitan": "oc", "georgian": "ka", "belarusian": "be",
+	"tajik": "tg", "sindhi": "sd", "gujarati": "gu", "amharic": "am",
+	"yiddish": "yi", "lao": "lo", "uzbek": "uz", "faroese": "fo",
+	"haitian creole": "ht", "pashto": "ps", "turkmen": "tk", "nynorsk": "nn",
+	"maltese": "mt", "sanskrit": "sa", "luxembourgish": "lb", "myanmar": "my",
+	"tibetan": "bo", "tagalog": "tl", "malagasy": "mg", "assamese": "as",
+	"tatar": "tt", "hawaiian": "haw", "lingala": "ln", "hausa": "ha",
+	"bashkir": "ba", "javanese": "jw", "sundanese": "su", "cantonese": "yue",
 }
 
-// getWhisperModelPath retorna o caminho do modelo GGML a usar, configuravel
-// via WHISPER_MODEL_PATH (sem precisar rebuild pra trocar/testar). Default:
-// ggml-base.bin -- ggml-small.bin (usado antes) media ~26-29s pra transcrever
-// um audio de 5s nessa maquina (medido, nao e' so' estimativa); ggml-base.bin
-// fica em ~10s pro mesmo audio, com qualidade ainda aceitavel pra audio
-// casual de WhatsApp.
-func getWhisperModelPath() string {
-	if path := os.Getenv("WHISPER_MODEL_PATH"); path != "" {
-		return path
+// whisperServerURL retorna a URL do endpoint /inference do whisper-server
+// local, configuravel via WHISPER_SERVER_URL (mesmo padrao de
+// WHISPER_MODEL_PATH antes). Default aponta pro processo pm2
+// "whisper-server" nessa mesma VPS (modelo carregado uma unica vez no boot
+// dele, sempre residente em memoria).
+func whisperServerURL() string {
+	if url := os.Getenv("WHISPER_SERVER_URL"); url != "" {
+		return url
 	}
-	return "/usr/local/share/whisper-models/ggml-base.bin"
+	return "http://127.0.0.1:8090/inference"
+}
+
+// transcribeWithWhisperServer chama o whisper-server (processo persistente,
+// modelo residente em memoria -- ver whisperServerURL) em vez de invocar o
+// binario CLI do whisper.cpp como subprocesso novo a cada chamada. O
+// reload/init do modelo a cada exec.Command era a maior parte do tempo
+// gasto (medido: ~26-65s via CLI virou ~3-22s via server dependendo do
+// modelo, sem mudar a precisao -- mesmo texto, so' mais rapido).
+func transcribeWithWhisperServer(wavPath string) (string, string, error) {
+	file, err := os.Open(wavPath)
+	if err != nil {
+		return "", "", fmt.Errorf("erro ao abrir wav pra envio: %v", err)
+	}
+	defer file.Close()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", filepath.Base(wavPath))
+	if err != nil {
+		return "", "", fmt.Errorf("erro ao montar multipart: %v", err)
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		return "", "", fmt.Errorf("erro ao copiar wav pro multipart: %v", err)
+	}
+	writer.WriteField("response_format", "verbose_json")
+	writer.WriteField("language", "auto")
+	if err := writer.Close(); err != nil {
+		return "", "", fmt.Errorf("erro ao finalizar multipart: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, whisperServerURL(), &body)
+	if err != nil {
+		return "", "", fmt.Errorf("erro ao montar requisição pro whisper-server: %v", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("erro ao chamar whisper-server: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", fmt.Errorf("erro ao ler resposta do whisper-server: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("whisper-server respondeu %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Text     string `json:"text"`
+		Language string `json:"language"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", "", fmt.Errorf("erro ao parsear resposta do whisper-server: %v (corpo: %s)", err, string(respBody))
+	}
+
+	transcription := strings.TrimSpace(result.Text)
+	if transcription == "" {
+		return "", "", errors.New("nenhuma transcrição encontrada")
+	}
+
+	language := whisperLangFullToShort[strings.ToLower(result.Language)]
+	if language == "" {
+		language = result.Language
+	}
+
+	return transcription, language, nil
 }
 
 // transcriptionHandler é o handler para o endpoint /transcription
@@ -380,71 +472,17 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 			outputFile = tempOutput
 		}
 
-		// Transcreve com Whisper
+		// Transcreve com Whisper (whisper-server, modelo residente em memoria)
 		start = time.Now()
-		whisperBinary := getWhisperBinary()
-		cmd = exec.Command(whisperBinary, outputFile, "--model", getWhisperModelPath(), "--language", "auto", "--output-json", "--threads", "2", "--best-of", "5", "--no-timestamps")
-		cmd.Stderr = os.Stderr // Redireciona stderr para os logs do PM2
-		output, err := cmd.Output() // Captura o stdout (transcrição bruta)
+		transcription, language, err = transcribeWithWhisperServer(outputFile)
 		whisperDuration := time.Since(start)
 		log.Printf("Tempo de transcrição com Whisper: %v", whisperDuration)
-		if err!= nil {
+		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao transcrever áudio: " + err.Error()}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
-
-		// Log da saída bruta do Whisper (transcrição bruta)
-		log.Printf("Saída bruta do Whisper (stdout): %s", string(output))
-
-		// Lê o arquivo JSON gerado pelo Whisper
-		jsonFile := outputFile + ".json" // ex.: temp-1743093117118393698/output.wav.json
-		jsonData, err := ioutil.ReadFile(jsonFile)
-		if err!= nil {
-			resp := TranscriptionResponse{Error: "Erro ao ler arquivo JSON do Whisper: " + err.Error()}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp)
-			return
-		}
-
-		// Log do conteúdo do arquivo JSON
-		log.Printf("Conteúdo do arquivo JSON do Whisper: %s", string(jsonData))
-
-		// Parseia o JSON
-		// === PARSE DO JSON DO WHISPER (CORRIGIDO) ===
-        var whisperOutput struct {
-            Result struct {
-                Language string `json:"language"`
-            } `json:"result"`
-            Transcription []struct {
-                Text string `json:"text"`
-            } `json:"transcription"`
-        }
-        
-        err = json.Unmarshal(jsonData, &whisperOutput)
-        if err != nil {
-            resp := TranscriptionResponse{Error: "Erro ao parsear JSON do Whisper: " + err.Error()}
-            w.Header().Set("Content-Type", "application/json")
-            json.NewEncoder(w).Encode(resp)
-            return
-        }
-        
-        if len(whisperOutput.Transcription) == 0 {
-            resp := TranscriptionResponse{Error: "Nenhuma transcrição encontrada"}
-            w.Header().Set("Content-Type", "application/json")
-            json.NewEncoder(w).Encode(resp)
-            return
-        }
-        
-        // Concatena todos os segmentos
-        var sb strings.Builder
-        for _, seg := range whisperOutput.Transcription {
-            sb.WriteString(seg.Text)
-            sb.WriteString(" ")
-        }
-        transcription = strings.TrimSpace(sb.String())
-        language = whisperOutput.Result.Language
 
 	case "video":
 		// Extrai o áudio do vídeo e converte para WAV
@@ -525,71 +563,17 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 			outputFile = tempOutput
 		}
 
-		// Transcreve com Whisper
+		// Transcreve com Whisper (whisper-server, modelo residente em memoria)
 		start = time.Now()
-		whisperBinary := getWhisperBinary()
-		cmd = exec.Command(whisperBinary, outputFile, "--model", getWhisperModelPath(), "--language", "auto", "--output-json", "--threads", "2", "--best-of", "5", "--no-timestamps")
-		cmd.Stderr = os.Stderr // Redireciona stderr para os logs do PM2
-		output, err := cmd.Output() // Captura o stdout (transcrição bruta)
+		transcription, language, err = transcribeWithWhisperServer(outputFile)
 		whisperDuration := time.Since(start)
 		log.Printf("Tempo de transcrição com Whisper: %v", whisperDuration)
-		if err!= nil {
+		if err != nil {
 			resp := TranscriptionResponse{Error: "Erro ao transcrever áudio do vídeo: " + err.Error()}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 			return
 		}
-
-		// Log da saída bruta do Whisper (transcrição bruta)
-		log.Printf("Saída bruta do Whisper (stdout): %s", string(output))
-
-		// Lê o arquivo JSON gerado pelo Whisper
-		jsonFile := outputFile + ".json" // ex.: temp-1743093117118393698/audio.wav.json
-		jsonData, err := ioutil.ReadFile(jsonFile)
-		if err!= nil {
-			resp := TranscriptionResponse{Error: "Erro ao ler arquivo JSON do Whisper: " + err.Error()}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp)
-			return
-		}
-
-		// Log do conteúdo do arquivo JSON
-		log.Printf("Conteúdo do arquivo JSON do Whisper: %s", string(jsonData))
-
-		// Parseia o JSON
-        // === PARSE DO JSON DO WHISPER (CORRIGIDO) ===
-        var whisperOutput struct {
-            Result struct {
-                Language string `json:"language"`
-            } `json:"result"`
-            Transcription []struct {
-                Text string `json:"text"`
-            } `json:"transcription"`
-        }
-        
-        err = json.Unmarshal(jsonData, &whisperOutput)
-        if err != nil {
-            resp := TranscriptionResponse{Error: "Erro ao parsear JSON do Whisper: " + err.Error()}
-            w.Header().Set("Content-Type", "application/json")
-            json.NewEncoder(w).Encode(resp)
-            return
-        }
-        
-        if len(whisperOutput.Transcription) == 0 {
-            resp := TranscriptionResponse{Error: "Nenhuma transcrição encontrada"}
-            w.Header().Set("Content-Type", "application/json")
-            json.NewEncoder(w).Encode(resp)
-            return
-        }
-        
-        // Concatena todos os segmentos
-        var sb strings.Builder
-        for _, seg := range whisperOutput.Transcription {
-            sb.WriteString(seg.Text)
-            sb.WriteString(" ")
-        }
-        transcription = strings.TrimSpace(sb.String())
-        language = whisperOutput.Result.Language
 
 	case "image":
 		// Realiza OCR com Tesseract
