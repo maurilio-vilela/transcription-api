@@ -6,6 +6,7 @@ Uma API em Go para transcrição de áudio, vídeo e OCR de imagens, utilizando 
 - **Transcrição de Áudio**: Transcreve áudios usando o Whisper, com detecção automática de idioma (ex.: português, inglês).
 - **Transcrição de Vídeo**: Extrai áudio de vídeos com FFmpeg e transcreve com Whisper, com detecção de idioma.
 - **OCR de Imagens**: Extrai texto de imagens usando Tesseract.
+- **Descriptografia nativa de mídia do WhatsApp**: aceita o `.enc` criptografado direto do WhatsApp (áudio, vídeo, imagem ou documento) junto com a `mediaKey`, e descriptografa internamente (HKDF-SHA256 + AES-256-CBC, mesmo esquema usado pelo Baileys) — não é preciso descriptografar antes de chamar a API.
 - **Geração de Áudio**: Gera áudio a partir do texto transcrito usando Piper-TTS (via Python), com modelos de voz específicos para o idioma detectado.
 
 ## Tecnologias Utilizadas
@@ -14,6 +15,7 @@ Uma API em Go para transcrição de áudio, vídeo e OCR de imagens, utilizando 
 - **FFmpeg**: Para extrair áudio de vídeos.
 - **Tesseract**: Para OCR em imagens.
 - **Piper-TTS (Python)**: Para geração de áudio (Text-to-Speech), com modelos para português e inglês.
+- **golang.org/x/crypto (HKDF)**: Para derivar as chaves de descriptografia da mídia do WhatsApp (HKDF-SHA256 + AES-256-CBC).
 
 ## Pré-requisitos
 Antes de usar a API, você precisa instalar as seguintes ferramentas no servidor:
@@ -121,12 +123,15 @@ Antes de usar a API, você precisa instalar as seguintes ferramentas no servidor
       "audio_base64": "<BASE64_DO_AUDIO>",
       "video_base64": "<BASE64_DO_VIDEO>",
       "image_base64": "<BASE64_DA_IMAGEM>",
+      "encrypted_audio": "<BASE64_DO_.ENC_DO_WHATSAPP>",
+      "media_key": "<BASE64_DA_MEDIA_KEY_DO_WHATSAPP>",
       "media_type": "audio" // ou "video" ou "image"
     }
     ```
-    
+
     * Use apenas um dos campos ``audio_base64``, ``video_base64`` ou ``image_base64``, dependendo do ``media_type``.
-    
+    * Alternativa pra mídia do WhatsApp: em vez de ``audio_base64``/``video_base64``/``image_base64`` já descriptografado, envie ``encrypted_audio`` (o arquivo `.enc` bruto, em Base64) junto com ``media_key`` (a `mediaKey` da mensagem, em Base64) — a API descriptografa internamente antes de processar. ``media_type`` continua obrigatório pra indicar o tipo de mídia (usado tanto pra escolher a info string da descriptografia quanto o pipeline de processamento).
+
 * Resposta:
     ```json
     {
@@ -142,6 +147,14 @@ Antes de usar a API, você precisa instalar as seguintes ferramentas no servidor
     curl -X POST https://api.dialogix.com.br/transcription \
       -H "Content-Type: application/json" \
       -d '{"audio_base64": "<BASE64_DO_.OGG>", "media_type": "audio"}'
+    ```
+
+* Exemplo com mídia criptografada do WhatsApp (sem descriptografar antes):
+
+    ```bash
+    curl -X POST https://api.dialogix.com.br/transcription \
+      -H "Content-Type: application/json" \
+      -d '{"encrypted_audio": "<BASE64_DO_.ENC>", "media_key": "<BASE64_DA_MEDIA_KEY>", "media_type": "audio"}'
     ```
     
 
