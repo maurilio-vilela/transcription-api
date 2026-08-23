@@ -133,6 +133,19 @@ func getWhisperBinary() string {
 	return ""
 }
 
+// getWhisperModelPath retorna o caminho do modelo GGML a usar, configuravel
+// via WHISPER_MODEL_PATH (sem precisar rebuild pra trocar/testar). Default:
+// ggml-base.bin -- ggml-small.bin (usado antes) media ~26-29s pra transcrever
+// um audio de 5s nessa maquina (medido, nao e' so' estimativa); ggml-base.bin
+// fica em ~10s pro mesmo audio, com qualidade ainda aceitavel pra audio
+// casual de WhatsApp.
+func getWhisperModelPath() string {
+	if path := os.Getenv("WHISPER_MODEL_PATH"); path != "" {
+		return path
+	}
+	return "/usr/local/share/whisper-models/ggml-base.bin"
+}
+
 // transcriptionHandler é o handler para o endpoint /transcription
 func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 	// Verifica se o método é POST
@@ -370,7 +383,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		// Transcreve com Whisper
 		start = time.Now()
 		whisperBinary := getWhisperBinary()
-		cmd = exec.Command(whisperBinary, outputFile, "--model", "/usr/local/share/whisper-models/ggml-small.bin", "--language", "auto", "--output-json", "--threads", "2", "--best-of", "5", "--no-timestamps")
+		cmd = exec.Command(whisperBinary, outputFile, "--model", getWhisperModelPath(), "--language", "auto", "--output-json", "--threads", "2", "--best-of", "5", "--no-timestamps")
 		cmd.Stderr = os.Stderr // Redireciona stderr para os logs do PM2
 		output, err := cmd.Output() // Captura o stdout (transcrição bruta)
 		whisperDuration := time.Since(start)
@@ -515,7 +528,7 @@ func transcriptionHandler(w http.ResponseWriter, r *http.Request) {
 		// Transcreve com Whisper
 		start = time.Now()
 		whisperBinary := getWhisperBinary()
-		cmd = exec.Command(whisperBinary, outputFile, "--model", "/usr/local/share/whisper-models/ggml-small.bin", "--language", "auto", "--output-json", "--threads", "2", "--best-of", "5", "--no-timestamps")
+		cmd = exec.Command(whisperBinary, outputFile, "--model", getWhisperModelPath(), "--language", "auto", "--output-json", "--threads", "2", "--best-of", "5", "--no-timestamps")
 		cmd.Stderr = os.Stderr // Redireciona stderr para os logs do PM2
 		output, err := cmd.Output() // Captura o stdout (transcrição bruta)
 		whisperDuration := time.Since(start)
